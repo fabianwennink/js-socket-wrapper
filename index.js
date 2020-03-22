@@ -3,51 +3,34 @@
 const WebSocket = require('ws');
 
 const RECONNECT_DELAY = 5000;
+const MAX_RECONNECT_ATTEMPTS = 3;
 
-class WebSocketWrapper {
+/**
+ * @author Fabian Wennink
+ */
+class ReconnectingWebSocket {
 
     // _url ~ Holds the server URL.
+    // _protocols ~ Holds the supported protocols.
     // _socket ~ Holds the WebSocket object.
     // _callbacks ~ Holds the callbacks.
-    // _canReconnect ~ If the WebSocketWrapper should try to reconnect automatically.
-    // _isServer ~ If the WebSocketWrapper instance is a Server or Client.
+    // _reconnectAttempts ~ The amount of reconnection attempts.
 
     /**
      * Initiate the socket connection as a client.
-     * @param host The host address of the server to connect to.
-     * @param port The port of the server to connect to.
-     * @param secure If the connection should be encrypted or not.
-     * @param reconnect If any attempt should be made to automatically reconnect to the server.
-     * @returns {WebSocketWrapper} A new instance of the WebSocketWrapper.
+     * @param {String} host The host address of the server to connect to.
+     * @param {Array} protocols The protocols supported by the server.
+     * @returns {ReconnectingWebSocket} A new instance of the WebSocketWrapper.
      */
-    client(host, port = '', secure = true, reconnect = true) {
-        const protocolSocket = (!secure) ? 'ws' : 'wss';
-        this._url = (port) ? `${protocolSocket}://${host}:${port}` : `${protocolSocket}://${host}`;
-        this._socket = new WebSocket(this._url);
+    constructor(host, protocols = []) {
+        this._socket = new WebSocket(host, protocols);
+        this._url = host;
+        this._protocols = protocols;
         this._callbacks = [];
-        this._canReconnect = reconnect;
-        this._isServer = false;
+        this._reconnectAttempts = 0;
 
-        // In case the server disconnects, try to reconnect.
-        if(reconnect) {
-            this.onDisconnect(() => {
-                this._attemptReconnecting();
-            });
-        }
+        this._registerReconnectionListeners();
 
-        return this;
-    }
-
-    /**
-     * Initiate the socket connection as a server.
-     * @param server The external server.
-     * @returns {WebSocketWrapper} A new instance of the WebSocketWrapper.
-     */
-    server(server) {
-        this._socket = new WebSocket.Server({ server });
-        this._callbacks = [];
-        this._canReconnect = false;
-        this._isServer = true;
         return this;
     }
 
@@ -56,19 +39,15 @@ class WebSocketWrapper {
      * @param {Function} callback The event callback.
      */
     onMessage(callback) {
-        return this._onEvent(SocketEvent.MESSAGE, callback);
+        this._onEvent(SocketEvent.MESSAGE, callback);
     }
 
     /**
-     * Bind a callback to the Connection/Open event of the socket server.
+     * Bind a callback to the Open event of the socket server.
      * @param {Function} callback The event callback.
      */
     onConnect(callback) {
-        if(this._isServer) {
-            this._onEvent(SocketEvent.CONNECTION, callback);
-        } else {
-            this._onEvent(SocketEvent.OPEN, callback);
-        }
+        this._onEvent(SocketEvent.OPEN, callback);
     }
 
     /**
@@ -101,13 +80,11 @@ class WebSocketWrapper {
      * @param {Function} callback The event callback.
      */
     unsubscribe(eventType, callback) {
-
-        // Remove from the callbacks array
         const index = this._callbacks.findIndex((cb) => cb.event === eventType && cb.callback === callback);
         if(index > 0) {
             const registeredCallback = this._callbacks[index].callback;
 
-            // Remove the event listener for the specific event
+            // Remove the event listener for the specific event.
             this._socket.removeEventListener(eventType, registeredCallback);
             this._callbacks.splice(index, 1);
         }
@@ -116,19 +93,15 @@ class WebSocketWrapper {
     /**
      * Internally used to register events with callbacks to the websocket.
      * The callback will be stored in cache for later reference.
-     * @param {SocketEvent} eventType The socket event type being bound.
+     * @param {SocketEvent} event The socket event type being bound.
      * @param {Function} callback The event callback.
      * @private
      */
-    _onEvent(eventType, callback) {
-        this._socket.on(eventType, callback);
+    _onEvent(event, callback) {
+        this._socket.on(event, callback);
 
         // Push the callback into the cache.
-        // Used during reconnects and unsubscribe events.
-        this._callbacks.push({
-            event: eventType,
-            callback
-        });
+        this._callbacks.push({ event, callback });
     }
 
     /**
@@ -149,15 +122,36 @@ class WebSocketWrapper {
     }
 
     /**
+     * Registers default event listeners which help detecting
+     * abnormal connection closing/refusing. Will automatically
+     * call {@link _attemptReconnecting} if problems are detected.
+     * @private
+     */
+    _registerReconnectionListeners() {
+        this.onDisconnect((e) => {
+            if(e.code !== 1000) { // code 1000 indicates CLOSE_NORMAL
+                this._attemptReconnecting();
+            }
+        });
+
+        this.onError((e) => {
+            if(e.code === 'ECONNREFUSED') {
+                this._attemptReconnecting();
+            }
+        });
+    }
+
+    /**
      * Tries to reconnect to the socket server.
      * @private
      */
     _attemptReconnecting() {
-        if(!this._canReconnect)
+        if(this._reconnectAttempts > MAX_RECONNECT_ATTEMPTS)
             return;
 
         setTimeout(() => {
-            this._socket = new WebSocket(this._url);
+            this._socket = new WebSocket(this._url, this._protocols);
+            this._reconnectAttempts++;
             this._rebindCallbacks();
         }, RECONNECT_DELAY);
     }
@@ -166,9 +160,8 @@ class WebSocketWrapper {
 const SocketEvent = Object.freeze({
     OPEN: 'open',
     MESSAGE: 'message',
-    CONNECTION: 'connection',
     ERROR: 'error',
     CLOSE: 'close'
 });
 
-module.exports = WebSocketWrapper;
+module.exports = ReconnectingWebSocket;

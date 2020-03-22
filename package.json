@@ -1,5 +1,6 @@
 {
-    "name": "websocketwrapper",
+    "name": "websocket-reconnect",
+    "description": "Wrapper for the module 'ws' which adds client-side server reconnection support.",
     "private": true,
     "version": "1.0.0",
     "main": "index.js",
